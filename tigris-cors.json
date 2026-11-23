@@ -1,7 +1,7 @@
 {
   "CORSRules": [
     {
-      "AllowedOrigins": ["https://your-xsign-domain.example"],
+      "AllowedOrigins": ["https://xsignapi.onrender.com"],
       "AllowedMethods": ["PUT", "GET", "HEAD"],
       "AllowedHeaders": ["*"],
       "ExposeHeaders": ["ETag"],
