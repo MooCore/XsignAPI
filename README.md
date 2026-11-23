@@ -5,7 +5,8 @@ This is the backend companion for the Xsign Next.js website. It implements the A
 ## Included
 
 - Express API with exact-origin CORS, security headers and per-IP rate limits
-- Presigned, browser-to-Tigris uploads for IPA, P12, mobileprovision, app icon and tweak files
+- Streamed, browser-to-Render IPA uploads for files within a configurable Render-safe threshold, with automatic Tigris fallback for larger IPAs or a Render 413 response
+- Presigned, browser-to-Tigris uploads for P12, mobileprovision, app icon, tweak files and oversized IPA fallback
 - Postgres-backed job queue with a separate background processing loop inside the Render service
 - AES-256-GCM encryption for the P12 password while a job is queued; the encrypted fields are erased after processing
 - P12/private-key extraction through OpenSSL using stdin for the password (not a command-line argument)
@@ -22,7 +23,7 @@ This is the backend companion for the Xsign Next.js website. It implements the A
 
 A single Render Docker Web Service runs both the HTTP API and an asynchronous worker loop. The worker claims queued jobs from Render Postgres using `FOR UPDATE SKIP LOCKED`, so the signing process does not run in the HTTP request. Job records survive service restarts; a lease lets a later worker cycle reclaim jobs interrupted by a restart.
 
-The service does not need a separate Redis/Key Value instance. The recommended Render Blueprint creates the API service and a small Postgres database.
+The service does not need a separate Redis/Key Value instance. The recommended Render Blueprint creates the API service and a small Postgres database. Direct IPA uploads are streamed to a short-lived local file on the same Render service instance and consumed by its colocated worker; signing outputs and oversized source IPAs are stored in Tigris.
 
 ## Requirements
 
@@ -51,6 +52,12 @@ The service does not need a separate Redis/Key Value instance. The recommended R
 
 The Blueprint uses the `2c-8g` web-service compute plan (2 CPU / 8 GB RAM) to give IPA extraction, tweak preparation and signing more headroom. It is a paid plan. The Postgres queue database uses the smallest paid `0.1c-256mb` plan because it stores job metadata rather than IPA files. You can change either plan in Render, but lower-memory API plans may need smaller upload limits or may fail on large IPAs.
 
+### Manual Web Service deployment (without Blueprint)
+
+If you create a Web Service manually, select **Docker** as the runtime and point Render at this repository's `Dockerfile`. Create a Render Postgres database separately, use its **Internal Database URL** as `DATABASE_URL`, and add `APP_MASTER_KEY`, `FRONTEND_ORIGIN`, and the Tigris AWS SDK credentials as environment variables. The application cannot create these managed Render resources when deployed as a plain Web Service.
+
+Set `DIRECT_IPA_UPLOAD_MAX_MB` to a conservative limit for the selected Render service plan. The shipped default is 100 MB. The frontend reads the live capability endpoint and chooses the direct route only up to this size; larger IPAs go straight to Tigris. A Render gateway/proxy HTTP 413 response or a low temporary-disk capacity response also triggers an automatic Tigris retry. Lower this setting on smaller plans or when the service has limited free disk space.
+
 ### Render environment variables
 
 The Blueprint sets these non-secret values automatically:
@@ -63,6 +70,10 @@ TIGRIS_BUCKET=ipa-signer
 FILE_RETENTION_MINUTES=10
 UPLOAD_URL_TTL_SECONDS=900
 MAX_IPA_MB=500
+DIRECT_IPA_UPLOAD_ENABLED=true
+DIRECT_IPA_UPLOAD_MAX_MB=100
+DIRECT_IPA_MIN_FREE_DISK_MB=256
+DIRECT_IPA_UPLOAD_TTL_MINUTES=30
 MAX_P12_MB=10
 MAX_PROFILE_MB=5
 MAX_ICON_MB=20
@@ -78,6 +89,10 @@ Do not add Tigris credentials to Vercel. Keep them on Render only. The AWS SDK v
 Optional variables:
 
 - `MAX_IPA_MB`: maximum uploaded or remote IPA size (default 500 MB)
+- `DIRECT_IPA_UPLOAD_ENABLED`: enable streamed direct-to-Render IPA uploads (default true)
+- `DIRECT_IPA_UPLOAD_MAX_MB`: largest IPA routed through Render's HTTP upload endpoint (default 100 MB). IPAs above this limit automatically use Tigris. Set this conservatively for the service's available disk, memory and compute plan. If Render's edge rejects an upload with HTTP 413, the browser automatically retries through Tigris.
+- `DIRECT_IPA_MIN_FREE_DISK_MB`: free temporary disk space to preserve after a direct IPA upload (default 256 MB). The capability endpoint subtracts this reserve from available filesystem space, and the upload route checks again before writing.
+- `DIRECT_IPA_UPLOAD_TTL_MINUTES`: lifetime of an unused local direct IPA upload (default 30 minutes)
 - `MAX_TOTAL_JOB_MB`: combined size of uploaded inputs in one job (default 900 MB)
 - `FILE_RETENTION_MINUTES`: result retention (default 10; minimum 5)
 - `DOWNLOAD_URL_TTL_SECONDS`: signed GET URL life (defaults to the result retention window)
@@ -128,6 +143,16 @@ Replace both example domains with your real addresses. `NEXT_PUBLIC_API_BASE_URL
 
 All endpoints are under the Render service origin.
 
+### `GET /v1/capabilities`
+
+The frontend reads these values before choosing the IPA upload route. The response contains `maxIpaBytes`, `directIpaUploadEnabled`, `directIpaUploadMaxBytes` and the configured large-file fallback. The threshold is controlled by `DIRECT_IPA_UPLOAD_MAX_MB` because Render does not expose an application's current compute plan as a reliable runtime upload-size value. The API also checks live temporary-filesystem capacity and preserves the `DIRECT_IPA_MIN_FREE_DISK_MB` reserve; when free space is low, it reports Tigris as the route.
+
+### `POST /v1/uploads/ipa-direct`
+
+The browser streams the raw `.ipa` body to Render using `Content-Type: application/octet-stream` and the `X-File-Name` and `X-File-Size` headers. The endpoint writes the stream to a mode-0600 temporary file without buffering the entire IPA in memory, then returns `{ "uploadId": "uuid", "uploadMode": "render" }`. The signing job references the upload using `inputs.ipaDirectUploadId`.
+
+If the file exceeds the configured direct-upload threshold or Render's HTTP ingress returns 413, the frontend retries the original file through the existing presigned Tigris route instead. Direct-upload files expire after `DIRECT_IPA_UPLOAD_TTL_MINUTES` if a signing job is never created. Because these are short-lived files on the service's local filesystem, a Render restart before the job begins may require the user to re-upload the IPA.
+
 ### `POST /v1/uploads/presign`
 
 Request:
@@ -162,7 +187,8 @@ The payload matches the current Vercel `components/signing-form.js`:
 ```json
 {
   "inputs": {
-    "ipaObjectKey": "incoming/ipa/uuid.ipa",
+    "ipaObjectKey": null,
+    "ipaDirectUploadId": "uuid-from-direct-upload",
     "ipaUrl": null,
     "p12ObjectKey": "incoming/p12/uuid.p12",
     "mobileprovisionObjectKey": "incoming/mobileprovision/uuid.mobileprovision",
@@ -184,7 +210,7 @@ The payload matches the current Vercel `components/signing-form.js`:
 }
 ```
 
-Use either `ipaObjectKey` or `ipaUrl`, never both. The uploaded IPA, P12 and mobileprovision are required; icon and tweaks are optional. The API checks that each unguessable upload reference was issued for the correct file purpose, has not expired or already been claimed, and has the expected uploaded size. Upload references are single-use. Client IP hashes are retained for abuse auditing, but uploads are not IP-bound because mobile network IPs can change between upload and job submission.
+Provide exactly one of `ipaObjectKey` (Tigris), `ipaDirectUploadId` (streamed local Render upload), or `ipaUrl`, never more than one. The uploaded IPA, P12 and mobileprovision are required; icon and tweaks are optional. The API checks that each unguessable upload reference was issued for the correct file purpose, has not expired or already been claimed, and has the expected uploaded size. Upload references are single-use. Client IP hashes are retained for abuse auditing, but uploads are not IP-bound because mobile network IPs can change between upload and job submission.
 
 Response:
 

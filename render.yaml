@@ -41,6 +41,14 @@ services:
         value: "900"
       - key: MAX_IPA_MB
         value: "500"
+      - key: DIRECT_IPA_UPLOAD_ENABLED
+        value: "true"
+      - key: DIRECT_IPA_UPLOAD_MAX_MB
+        value: "100"
+      - key: DIRECT_IPA_MIN_FREE_DISK_MB
+        value: "256"
+      - key: DIRECT_IPA_UPLOAD_TTL_MINUTES
+        value: "30"
       - key: MAX_P12_MB
         value: "10"
       - key: MAX_PROFILE_MB
