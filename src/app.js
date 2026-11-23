@@ -16,7 +16,7 @@ app.use(cors({
     return callback(new Error('Origin is not allowed by Xsign CORS policy.'));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
+  allowedHeaders: ['Content-Type', 'X-File-Name', 'X-File-Size'],
   exposedHeaders: [],
   credentials: false,
   maxAge: 600,
@@ -37,6 +37,13 @@ const createJobLimiter = rateLimit({
   legacyHeaders: false,
   message: { message: 'Too many signing jobs from this connection. Please try again later.' },
 });
+const directUploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 6,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: { message: 'Too many direct IPA uploads from this connection. Please try again later.' },
+});
 const statusLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: 90,
@@ -46,6 +53,7 @@ const statusLimiter = rateLimit({
 });
 
 app.use('/v1/uploads/presign', presignLimiter);
+app.use('/v1/uploads/ipa-direct', directUploadLimiter);
 app.use('/v1/signing/jobs', (req, res, next) => req.method === 'POST' ? createJobLimiter(req, res, next) : statusLimiter(req, res, next));
 app.use(router);
 

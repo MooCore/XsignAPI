@@ -208,7 +208,19 @@ async function safeDeleteInputObjects(inputs) {
     inputs?.iconObjectKey,
     ...(Array.isArray(inputs?.tweakObjectKeys) ? inputs.tweakObjectKeys : []),
   ].filter(Boolean);
-  if (keys.length) await deleteObjects(keys);
+  const cleanupTasks = [];
+  if (keys.length) cleanupTasks.push(deleteObjects(keys));
+  if (inputs?.ipaDirectUploadId && /^[0-9a-f-]{36}$/i.test(inputs.ipaDirectUploadId)) {
+    const localPath = path.join(config.directUploadDir, `${inputs.ipaDirectUploadId}.ipa`);
+    cleanupTasks.push((async () => {
+      await rm(localPath, { force: true });
+      await pool.query('DELETE FROM direct_ipa_uploads WHERE id = $1', [inputs.ipaDirectUploadId]);
+    })());
+  }
+  const results = await Promise.allSettled(cleanupTasks);
+  if (results.some((result) => result.status === 'rejected')) {
+    throw new Error('One or more input files could not be cleaned up.');
+  }
 }
 
 export async function processSigningJob(job, workerId) {
@@ -227,16 +239,27 @@ export async function processSigningJob(job, workerId) {
       ).catch(() => {});
     }, 30000);
 
-    await updateStage(job.id, workerId, 5, 'Downloading signing files');
+    await updateStage(job.id, workerId, 22, 'Preparing the signing workspace');
     const ipaPath = path.join(workDir, 'source.ipa');
-    if (inputs.ipaObjectKey) {
+    if (inputs.ipaDirectUploadId && /^[0-9a-f-]{36}$/i.test(inputs.ipaDirectUploadId)) {
+      const localIpaPath = path.join(config.directUploadDir, `${inputs.ipaDirectUploadId}.ipa`);
+      const localStats = await stat(localIpaPath).catch(() => null);
+      if (!localStats || localStats.size <= 0 || localStats.size > config.maxIpaBytes) {
+        throw new PublicJobError('The direct Render upload is no longer available. Please upload the IPA again.');
+      }
+      await updateStage(job.id, workerId, 26, 'Loading IPA from the direct Render upload');
+      await copyFile(localIpaPath, ipaPath);
+    } else if (inputs.ipaObjectKey) {
+      await updateStage(job.id, workerId, 26, 'Loading large IPA from Tigris storage');
       await downloadObject(inputs.ipaObjectKey, ipaPath, config.maxIpaBytes);
     } else if (inputs.ipaUrl) {
+      await updateStage(job.id, workerId, 26, 'Downloading IPA from the supplied URL');
       await downloadRemoteIpa(inputs.ipaUrl, ipaPath, config.maxIpaBytes);
     } else {
       throw new PublicJobError('The IPA file or URL is missing.');
     }
 
+    await updateStage(job.id, workerId, 32, 'Downloading certificate and provisioning profile');
     const p12Path = path.join(workDir, 'certificate.p12');
     const profilePath = path.join(workDir, 'profile.mobileprovision');
     await Promise.all([
@@ -257,24 +280,26 @@ export async function processSigningJob(job, workerId) {
       await downloadObject(inputs.iconObjectKey, iconInput, config.maxIconBytes);
     }
 
-    await updateStage(job.id, workerId, 18, 'Validating and extracting IPA');
+    await updateStage(job.id, workerId, 40, 'Validating and extracting IPA');
     const extractedDir = path.join(workDir, 'extracted');
     const extracted = await runPython(['extract', '--ipa', ipaPath, '--dest', extractedDir], { timeoutMs: 180000 });
     const appPath = extracted.appPath;
     const options = job.options || {};
 
-    await updateStage(job.id, workerId, 30, 'Applying app configuration');
+    await updateStage(job.id, workerId, 48, 'Applying app name, version and display settings');
     const patched = await runPython([
       'patch', '--app', appPath, '--options', JSON.stringify(options),
     ], { timeoutMs: 60000 });
 
+    await updateStage(job.id, workerId, 56, 'Preparing optional app icon and tweak files');
     const libraries = await prepareTweakLibraries(tweakFiles, workDir);
     const iconPng = iconInput ? await prepareIcon(iconInput, workDir) : null;
+    await updateStage(job.id, workerId, 62, 'Unlocking and validating the P12 certificate');
     passwordBuffer = decryptSecret(job.password_ciphertext, job.password_nonce, job.password_tag);
     const { keyPath, certPath } = await extractP12(p12Path, passwordBuffer, workDir);
     passwordBuffer = null;
 
-    await updateStage(job.id, workerId, 48, 'Signing application');
+    await updateStage(job.id, workerId, 68, 'Signing application with zsign');
     const signedPath = path.join(workDir, 'signed.ipa');
     const args = [
       '-f', '-k', keyPath, '-c', certPath, '-m', profilePath,
@@ -296,18 +321,18 @@ export async function processSigningJob(job, workerId) {
       throw new PublicJobError('The zsign engine could not be started. Please contact Xsign support.');
     }
 
-    await updateStage(job.id, workerId, 78, 'Verifying signed IPA');
+    await updateStage(job.id, workerId, 82, 'Verifying the signed application');
     await runPython(['validate', '--ipa', signedPath], { timeoutMs: 180000 });
     const signedStats = await stat(signedPath);
     if (signedStats.size > config.maxIpaBytes * 2) throw new PublicJobError('The signed IPA is larger than the allowed output size.');
 
-    await updateStage(job.id, workerId, 88, 'Uploading signed IPA');
+    await updateStage(job.id, workerId, 90, 'Uploading signed IPA to secure storage');
     const signedKey = `results/${job.id}/signed.ipa`;
     await uploadFile(signedKey, signedPath, 'application/octet-stream');
     resultKeys.push(signedKey);
     const downloadUrl = await createDownloadUrl(signedKey, 'application/octet-stream');
 
-    await updateStage(job.id, workerId, 94, 'Generating OTA installation manifest');
+    await updateStage(job.id, workerId, 96, 'Generating OTA installation manifest');
     const manifestPath = path.join(workDir, 'manifest.plist');
     const metadata = patched || extracted.metadata || {};
     const appName = options.appName || metadata.appName || 'Signed App';

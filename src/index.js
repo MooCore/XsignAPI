@@ -9,6 +9,8 @@ import { startBackgroundWorker, stopBackgroundWorker } from './worker.js';
 async function clearStaleWorkDirectories() {
   await mkdir(config.tempDir, { recursive: true, mode: 0o700 });
   await chmod(config.tempDir, 0o700);
+  await mkdir(config.directUploadDir, { recursive: true, mode: 0o700 });
+  await chmod(config.directUploadDir, 0o700);
   const entries = await readdir(config.tempDir, { withFileTypes: true });
   await Promise.all(entries.map((entry) => rm(path.join(config.tempDir, entry.name), { recursive: true, force: true })));
 }
@@ -22,6 +24,7 @@ async function main() {
   const server = app.listen(config.port, '0.0.0.0', () => {
     console.info(`Xsign API listening on port ${config.port}.`);
   });
+  server.requestTimeout = 10 * 60 * 1000;
 
   const workerPromise = startBackgroundWorker();
   workerPromise.catch((error) => {

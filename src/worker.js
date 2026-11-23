@@ -1,6 +1,7 @@
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
+import path from 'node:path';
 import { config } from './config.js';
 import { pool } from './db.js';
 import { deleteObjects } from './storage.js';
@@ -86,6 +87,23 @@ async function cleanupExpired() {
       await pool.query('DELETE FROM uploads WHERE object_key = ANY($1::text[])', [keys]);
     } catch {
       // Keep the rows so deletion is retried.
+    }
+  }
+
+  const abandonedDirect = await pool.query(
+    `SELECT d.id FROM direct_ipa_uploads d
+     LEFT JOIN signing_jobs j ON j.id = d.job_id
+     WHERE (d.used_at IS NULL AND d.expires_at <= NOW())
+        OR (d.used_at IS NOT NULL AND j.status IN ('completed','failed','expired'))
+        OR (d.used_at IS NOT NULL AND d.created_at < NOW() - INTERVAL '1 day')
+     ORDER BY d.created_at ASC LIMIT 100`,
+  );
+  for (const upload of abandonedDirect.rows) {
+    try {
+      await rm(path.join(config.directUploadDir, `${upload.id}.ipa`), { force: true });
+      await pool.query('DELETE FROM direct_ipa_uploads WHERE id = $1', [upload.id]);
+    } catch {
+      // Keep the database row so the local-file cleanup can be retried.
     }
   }
 

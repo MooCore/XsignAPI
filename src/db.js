@@ -54,6 +54,19 @@ export async function initializeDatabase() {
       job_id UUID REFERENCES signing_jobs(id) ON DELETE SET NULL
     );
     CREATE INDEX IF NOT EXISTS uploads_expiry_idx ON uploads (expires_at);
+
+    CREATE TABLE IF NOT EXISTS direct_ipa_uploads (
+      id UUID PRIMARY KEY,
+      file_name TEXT NOT NULL,
+      expected_size BIGINT NOT NULL,
+      ip_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      used_at TIMESTAMPTZ,
+      job_id UUID REFERENCES signing_jobs(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS direct_ipa_uploads_expiry_idx
+      ON direct_ipa_uploads (expires_at);
   `);
 }
 
