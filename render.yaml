@@ -1,0 +1,67 @@
+services:
+  - type: web
+    name: xsign-api
+    runtime: docker
+    plan: 2c-8g
+    region: ohio
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: npm start
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 120
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: xsign-postgres
+          property: connectionString
+      - key: APP_MASTER_KEY
+        generateValue: true
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_ENDPOINT_URL_S3
+        value: https://t3.storage.dev
+      - key: AWS_ENDPOINT_URL_IAM
+        value: https://iam.storage.dev
+      - key: AWS_REGION
+        value: auto
+      - key: TIGRIS_BUCKET
+        value: ipa-signer
+      - key: FILE_RETENTION_MINUTES
+        value: "10"
+      - key: UPLOAD_URL_TTL_SECONDS
+        value: "900"
+      - key: MAX_IPA_MB
+        value: "500"
+      - key: MAX_P12_MB
+        value: "10"
+      - key: MAX_PROFILE_MB
+        value: "5"
+      - key: MAX_ICON_MB
+        value: "20"
+      - key: MAX_TWEAK_MB
+        value: "100"
+      - key: MAX_TWEAK_FILES
+        value: "8"
+      - key: MAX_TOTAL_JOB_MB
+        value: "900"
+      - key: JOB_TIMEOUT_SECONDS
+        value: "1200"
+      - key: WORKER_POLL_MS
+        value: "1500"
+
+databases:
+  - name: xsign-postgres
+    plan: 0.1c-256mb
+    region: ohio
+    postgresMajorVersion: "18"
+    databaseName: xsign
+    user: xsign
